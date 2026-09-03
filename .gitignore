@@ -1,0 +1,27 @@
+# Internal working notes (deployment account, environment specifics, full
+# debugging history) — not for publication. Mirrors the same call made on
+# the sibling aws-weekly-digest repo.
+WEEKLY_UPDATE.md
+docs/
+
+# V1 (Google Apps Script) historical implementation — superseded by the
+# Cloud Run job below. Kept locally for reference, not part of this repo.
+Code.gs
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

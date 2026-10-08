@@ -138,6 +138,7 @@ _EMAIL_STRINGS = {
         'error_subject': '[GCP] Weekly Digest 產生失敗',
         'error_body':    '錯誤訊息：{msg}',
         'error_text':    '錯誤：{msg}',
+        'link_label':    '官方公告 ↗',
     },
     'en': {
         'stats':        '{today} | {rn} Release Notes, {blog} Blog posts',
@@ -147,6 +148,7 @@ _EMAIL_STRINGS = {
         'error_subject': '[GCP] Weekly Digest generation failed',
         'error_body':    'Error: {msg}',
         'error_text':    'Error: {msg}',
+        'link_label':    'Read more ↗',
     },
 }
 
@@ -467,21 +469,85 @@ GCP Weekly Digest Bot | {today}
 _PROMPT_BUILDERS = {'zh-TW': _prompt_zh_tw, 'en': _prompt_en}
 
 
+MAX_OUTPUT_TOKENS = 8192
+
+# Ceiling for the one retry after a response stops at MAX_TOKENS. Gemini 3
+# models count thinking against max_output_tokens, so a long week can run out
+# before the digest is finished. Stays well under the model's output limit.
+RETRY_MAX_OUTPUT_TOKENS = 32768
+
+
+class TruncatedOutputError(RuntimeError):
+    """The model stopped before finishing. The text it did return is not usable."""
+
+
 def _invoke_gemini(prompt):
-    """Shared Gemini call path for both the digest body and the account advice section."""
+    """Shared Gemini call path for both the digest body and the account advice section.
+
+    Returns the text only if the model finished cleanly. finish_reason used to
+    go unread, so a reply cut off at max_output_tokens was mailed out as if it
+    were the whole digest. Now:
+
+    - MAX_TOKENS: retried once with RETRY_MAX_OUTPUT_TOKENS. Still cut off ->
+      TruncatedOutputError.
+    - Any other non-STOP reason (SAFETY, RECITATION, ...): RuntimeError. The
+      text may be partial and nothing in the response says how much is missing.
+    - Finished but empty: RuntimeError.
+
+    Raising is the point. For the digest it lands in main()'s error path (error
+    email, job fails) instead of a half digest going out; the advice section
+    catches it and drops itself (see account_context.build_advice_section).
+    """
     client = genai.Client(
         enterprise=True,
         project=CONFIG['GCP_PROJECT_ID'],
         location=CONFIG['VERTEX_LOCATION'],
     )
+    model  = CONFIG['GEMINI_MODEL']
+    budget = MAX_OUTPUT_TOKENS
 
+    text, reason = _gemini_call(client, model, prompt, budget)
+
+    if reason == 'MAX_TOKENS' and RETRY_MAX_OUTPUT_TOKENS > budget:
+        print(f'WARNING: {model} stopped at max_output_tokens={budget}; '
+              f'retrying once with {RETRY_MAX_OUTPUT_TOKENS}')
+        budget = RETRY_MAX_OUTPUT_TOKENS
+        text, reason = _gemini_call(client, model, prompt, budget)
+
+    if reason == 'MAX_TOKENS':
+        raise TruncatedOutputError(
+            f'{model} output was cut off at max_output_tokens={budget} '
+            f'({len(text or "")} chars returned); not using a partial reply')
+    if reason not in _CLEAN_FINISH_REASONS:
+        raise RuntimeError(f'{model} did not finish cleanly (finish_reason={reason}, '
+                           f'{len(text or "")} chars returned)')
+    if not text or not text.strip():
+        raise RuntimeError(f'{model} returned no text (finish_reason={reason})')
+    return text
+
+
+# STOP is the normal case. None / UNSPECIFIED means the API did not say; with
+# non-empty text that is accepted rather than failing the run on a missing field.
+_CLEAN_FINISH_REASONS = ('STOP', 'FINISH_REASON_UNSPECIFIED', None)
+
+
+def _gemini_call(client, model, prompt, max_output_tokens):
+    """One generate_content call. Returns (text, finish_reason name or None)."""
     response = client.models.generate_content(
-        model=CONFIG['GEMINI_MODEL'],
+        model=model,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=8192),
+        config=types.GenerateContentConfig(temperature=0.3, max_output_tokens=max_output_tokens),
     )
-
-    return response.text
+    candidates = getattr(response, 'candidates', None) or []
+    reason = getattr(candidates[0], 'finish_reason', None) if candidates else None
+    if reason is not None:
+        reason = getattr(reason, 'name', None) or str(reason)
+    try:
+        text = response.text
+    except Exception:                                           # noqa: BLE001
+        # .text raises on some blocked responses; finish_reason carries the why.
+        text = None
+    return text, reason
 
 
 # ────────────────────────────────────────────────────────────
@@ -507,7 +573,8 @@ def send_email(digest_content, gcs_url, rn_count, blog_count):
     today    = _fmt_date(datetime.now())
     gcs_link = (f'<p style="margin:12px 0"><a href="https://console.cloud.google.com/storage/browser/{CONFIG["GCS_BUCKET"]}" '
                 f'style="color:#4285f4;font-weight:600">{s["gcs_link"]}</a></p>') if gcs_url else ''
-    body_html = markdown_to_html(digest_content) if CONFIG['FEATURES']['EMBED_CONTENT_IN_EMAIL'] else ''
+    body_html = (markdown_to_html(digest_content, link_label=s['link_label'])
+                 if CONFIG['FEATURES']['EMBED_CONTENT_IN_EMAIL'] else '')
     stats     = s['stats'].format(today=today, rn=rn_count, blog=blog_count)
 
     html_body = f"""
@@ -748,10 +815,22 @@ def post_to_webhook(content, gcs_url):
 # ────────────────────────────────────────────────────────────
 # Markdown -> HTML (for email, GCP blue theme)
 # ────────────────────────────────────────────────────────────
-def markdown_to_html(markdown):
+_MD_LINK = re.compile(r'\[([^\]]+)\]\((https?://[^)\s]+)\)')
+
+
+def markdown_to_html(markdown, link_label='Read more ↗'):
     def _unescape(s):
         return s.replace(r'\*', '*').replace(r'\_', '_').replace(r'\#', '#').replace(r'\[', '[').replace(r'\]', ']')
+    def _link(m):
+        # The model writes official links as [text](url), sometimes as [url](url).
+        # The mail showed that syntax verbatim; showing a long URL as the label is
+        # unreadable too, so a bare-URL label becomes link_label.
+        text, url = m.group(1), m.group(2)
+        label = link_label if text.strip() == url or text.startswith('http') else text
+        return (f'<a href="{html.escape(url, quote=True)}" '
+                f'style="color:#1a73e8;text-decoration:none">{label}</a>')
     def _bold(s):
+        s = _MD_LINK.sub(_link, s)
         return re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', s)
 
     out = []

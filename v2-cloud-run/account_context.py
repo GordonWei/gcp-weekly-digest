@@ -309,16 +309,24 @@ def build_advice_section(lang, project_id, invoke_llm):
     swallowing a parser error, silently mailing out a permanently blank section
     for weeks), so failures here are returned as a warning for the caller to
     print, rather than being silently absorbed in this function.
+
+    "Never raises" covers the model call too. It used to cover only the
+    Recommender fetch, so a failed or cut-off Gemini reply for this section
+    sent the error email in place of the whole digest.
     """
+    try:
+        return _build_advice_section(lang, project_id, invoke_llm)
+    except Exception as e:                                      # noqa: BLE001
+        return '', f'account advice skipped: {type(e).__name__}: {e}'
+
+
+def _build_advice_section(lang, project_id, invoke_llm):
     builder = _PROMPTS.get(lang) or _PROMPTS['zh-TW']
 
     if not project_id:
         return '', 'account advice skipped: 沒有 GCP_PROJECT_ID'
 
-    try:
-        items = fetch_recommendations(project_id)
-    except Exception as e:                                      # noqa: BLE001
-        return '', f'account advice skipped: {type(e).__name__}: {e}'
+    items = fetch_recommendations(project_id)
 
     if not items:
         # This is good news, not a failure; but it still needs to be said, otherwise

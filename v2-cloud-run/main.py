@@ -1,50 +1,70 @@
 """
 GCP Weekly Digest — Cloud Run Job (V2)
 
-一封信回答兩個問題：GCP 這週出了什麼，以及這件事對我現在跑的東西代表什麼。
+One email answers two questions: what happened in GCP this week, and what it
+means for what I'm actually running.
 
-前半彙整 GCP Release Notes + Blog，交給 Vertex AI Gemini 寫成分類週報。
-後半讀這個專案自己的 Cloud Recommender 建議，附上「有什麼值得處理」
-（見 account_context.py，用 FEATURE_ACCOUNT_ADVICE 開啟）。
-release notes 給不了後半，因為它不知道你手上有什麼。
+The first half aggregates GCP Release Notes + Blog posts and hands them to
+Vertex AI Gemini to write a categorized weekly digest. The second half reads
+this project's own Cloud Recommender findings and appends "what's worth
+acting on" (see account_context.py, gated by FEATURE_ACCOUNT_ADVICE). Release
+notes alone can't cover that second half, because they have no idea what
+you're actually running.
 
-對標姊妹專案 AWS Weekly Digest（github.com/GordonWei/aws-weekly-digest），
-程式結構、環境變數風格、輸出格式盡量對稱，方便寫「AWS vs GCP」對照文章。
+Mirrors the sister project AWS Weekly Digest
+(github.com/GordonWei/aws-weekly-digest) — code structure, env var naming, and
+output format are kept as symmetric as possible to make an "AWS vs GCP"
+comparison piece easier to write later.
 
-V2 相較 V1（Google Apps Script）的關鍵差異：
-- 執行環境：Apps Script → Cloud Run Job（不綁 Google Workspace）
-- AI SDK：Vertex AI REST + OAuth → google-genai SDK + enterprise=True（IAM 直接認證）
-  （google-cloud-aiplatform 的 generative_models 模組已於 2025-06-24 棄用、
-  2026-06-24 起下架，官方目前的建議路徑是 google-genai，經查證 pip 套件原始碼
-  確認 Client(enterprise=True, ...) 為現行參數，vertexai=True 為相容別名）
-- 模型：gemini-2.5-flash-lite（V1）→ gemini-3.1-flash-lite
-  （2.5-flash-lite 將於 2026-10-16/20 全面下架，沿用 V1 模型會讓每週排程活不過兩個月）
-- 存檔：Google Drive → GCS
-- Email：GmailApp（綁 Google 帳號）→ SendGrid（V2.0，2026-08-27）→ Gmail API 網域範圍委派
-  （V2.1，2026-09-03，見 README——SendGrid 帳號被寄信服務商永久拒絕重啟）
-- Blog RSS 來源：V1 用的 https://cloud.google.com/blog/rss/ 已失效（改回傳 HTML，非 XML，
-  實測 curl 驗證），改用目前仍有效的 https://cloudblog.withgoogle.com/rss/
+Key differences between V2 and V1 (Google Apps Script):
+- Runtime: Apps Script -> Cloud Run Job (no longer tied to Google Workspace)
+- AI SDK: Vertex AI REST + OAuth -> google-genai SDK + enterprise=True (direct
+  IAM auth) (the generative_models module in google-cloud-aiplatform was
+  deprecated on 2025-06-24 and will be removed on 2026-06-24; the official
+  recommended path is now google-genai — verified against the pip package
+  source that Client(enterprise=True, ...) is the current parameter and
+  vertexai=True is a compatibility alias)
+- Model: gemini-2.5-flash-lite (V1) -> gemini-3.1-flash-lite (2.5-flash-lite
+  is being fully retired on 2026-10-16/20; staying on the V1 model would mean
+  the weekly schedule doesn't survive two more months)
+- Archive: Google Drive -> GCS
+- Email: GmailApp (tied to a Google account) -> SendGrid (V2.0, 2026-08-27) ->
+  Gmail API domain-wide delegation (V2.1, 2026-09-03, see README — the
+  SendGrid account was permanently denied reactivation by the provider)
+- Blog RSS source: the V1 feed https://cloud.google.com/blog/rss/ is dead (now
+  returns HTML instead of XML, verified with curl); switched to the still-live
+  https://cloudblog.withgoogle.com/rss/
 
-V2.1（2026-09-03）：Email 管道再次更換，SendGrid → Gmail API + Service Account
-網域範圍委派（impersonate 你自己的 Workspace/Gmail 帳號）。原因：SendGrid 帳號
-因長期 deferred 被永久拒絕重啟（見 README），Mailgun 需要綁信用卡不想用；
-若收件網域的 MX 本來就指向 Google，網域範圍委派可以免除管理第三方 Email 服務帳號。
-EMAIL_PROVIDER 環境變數保留 SendGrid 路徑（程式碼未刪除），預設值改為 gmail。
+V2.1 (2026-09-03): switched the email channel again, SendGrid -> Gmail API +
+Service Account domain-wide delegation (impersonating your own Workspace/
+Gmail account). Reason: the SendGrid account was permanently denied
+reactivation after prolonged "deferred" status (see README), and Mailgun
+requires a credit card on file which we'd rather avoid. If the recipient
+domain's MX already points to Google, domain-wide delegation removes the need
+to manage a third-party email service account. The EMAIL_PROVIDER env var
+keeps the SendGrid path (code not removed); the default is now gmail.
 
-**keyless（同日追加）**：原設計讀取掛載的 SA JSON 金鑰檔，部署時撞上組織政策
-`constraints/iam.disableServiceAccountKeyCreation`（`gcp-weekly-digest-mailer-sa`
-無法建立金鑰，非權限不足）。改為不落地任何金鑰檔的 keyless 流程：Job 執行身分
-`gcp-weekly-digest-sa`（Cloud Run 上用 ADC）先用 IAM Credentials API 對
-`gcp-weekly-digest-mailer-sa` 做 signJwt（已授 `roles/iam.serviceAccountTokenCreator`
-在該 SA 資源上，非專案層級），簽出 `sub=GMAIL_IMPERSONATE_USER` 的 JWT，再拿它跟 Google OAuth
-token endpoint 換一個代表該使用者的 access token（RFC 7523 JWT-bearer flow）——
-這個 token 才是真正握有網域範圍委派授權的憑證。全程沒有金鑰檔案落地，也不需要
-組織政策例外。詳見 `_gmail_send()` 與 README。
+**Keyless (added same day)**: the original design read a mounted SA JSON key
+file, but deployment hit the org policy
+`constraints/iam.disableServiceAccountKeyCreation` (`gcp-weekly-digest-mailer-sa`
+can't create a key — this is a policy block, not an IAM permission gap).
+Replaced with a keyless flow that never writes a key file to disk: the job's
+runtime identity `gcp-weekly-digest-sa` (using ADC on Cloud Run) calls the IAM
+Credentials API to signJwt as `gcp-weekly-digest-mailer-sa` (granted
+`roles/iam.serviceAccountTokenCreator` on that SA resource, not at the project
+level), producing a JWT with `sub=GMAIL_IMPERSONATE_USER`. That JWT is then
+exchanged with the Google OAuth token endpoint for an access token
+representing that user (RFC 7523 JWT-bearer flow) — that access token is what
+actually carries the domain-wide delegation grant. No key file ever touches
+disk, and no org policy exception is needed. See `_gmail_send()` and the
+README for details.
 
-V2.2：加入 `DIGEST_LANGUAGE`（`en` / `zh-TW`，預設 `en`）——比照 AWS Weekly Digest
-的做法，一個設定同時控制週報主體（`_prompt_en`/`_prompt_zh_tw`）、帳號建議區段
-（`account_context.py` 本來就已支援兩種語言）、email 靜態文字（`_EMAIL_STRINGS`），
-避免英文週報裝在中文標籤的信裡寄出。
+V2.2: added `DIGEST_LANGUAGE` (`en` / `zh-TW`, default `en`) — following the
+same approach as AWS Weekly Digest, one setting controls the digest body
+(`_prompt_en`/`_prompt_zh_tw`), the account advice section
+(`account_context.py` already supported both languages), and the email's
+static strings (`_EMAIL_STRINGS`), so an English digest never ends up wrapped
+in a Chinese-labelled email.
 """
 
 import html
@@ -62,7 +82,7 @@ from google.cloud import storage
 
 import account_context
 
-# ── 設定（環境變數驅動，比照 AWS Lambda 版風格）──────────────────
+# ── Config (env-var driven, mirrors the AWS Lambda version's style) ──────
 CONFIG = {
     'GCP_PROJECT_ID':   os.environ.get('GCP_PROJECT_ID', ''),
     'VERTEX_LOCATION':  os.environ.get('VERTEX_LOCATION', 'global'),
@@ -80,7 +100,7 @@ CONFIG = {
     # strings in the email wrapper — mirrors AWS Weekly Digest's DIGEST_LANGUAGE.
     'DIGEST_LANGUAGE':  os.environ.get('DIGEST_LANGUAGE', 'en'),
 
-    # ── Email 管道：gmail（V2.1 預設，keyless 網域範圍委派）或 sendgrid（保留，V2.0 舊路徑）──
+    # ── Email channel: gmail (V2.1 default, keyless domain-wide delegation) or sendgrid (kept, V2.0 legacy path) ──
     'EMAIL_PROVIDER':        os.environ.get('EMAIL_PROVIDER', 'gmail'),
     'GMAIL_MAILER_SA_EMAIL': os.environ.get(
         'GMAIL_MAILER_SA_EMAIL',
@@ -88,15 +108,16 @@ CONFIG = {
     ),
     'GMAIL_IMPERSONATE_USER': os.environ.get('GMAIL_IMPERSONATE_USER', ''),
 
-    # ── 輸出管道開關（false = 預留，程式碼已就位）────────────
+    # ── Output channel toggles (false = reserved, code is already in place) ────────────
     'FEATURES': {
         'SEND_EMAIL':             os.environ.get('FEATURE_SEND_EMAIL',      'true') == 'true',
         'EMBED_CONTENT_IN_EMAIL': os.environ.get('FEATURE_EMBED_CONTENT',   'true') == 'true',
         'SAVE_TO_GCS':            os.environ.get('FEATURE_SAVE_TO_GCS',     'true') == 'true',
         'POST_TO_LINKEDIN':       os.environ.get('FEATURE_POST_TO_LINKEDIN', 'false') == 'true',
         'POST_TO_WEBHOOK':        os.environ.get('FEATURE_POST_TO_WEBHOOK',  'false') == 'true',
-        # 週報的另一半：回頭看這個專案自己有什麼值得處理的（見 account_context.py）。
-        # 預設關閉是因為它需要 Recommender 的讀取權限，不是因為它比較不重要。
+        # The digest's other half: looking back at what's actually worth acting on in
+        # this project (see account_context.py). Off by default because it needs
+        # Recommender read access, not because it matters less.
         'ACCOUNT_ADVICE':         os.environ.get('FEATURE_ACCOUNT_ADVICE',   'false') == 'true',
     },
 }
@@ -135,7 +156,7 @@ def _strings():
 
 
 # ────────────────────────────────────────────────────────────
-# 主程式
+# Main entry point
 # ────────────────────────────────────────────────────────────
 def main():
     print('開始產生 GCP Weekly Digest...')
@@ -154,8 +175,9 @@ def main():
             section, warn = account_context.build_advice_section(
                 CONFIG['DIGEST_LANGUAGE'], CONFIG['GCP_PROJECT_ID'], _invoke_gemini)
             if warn:
-                # 故意印得很大聲。這一段掉了不該連累週報，但也不能無聲無息地消失——
-                # 「區段不見」跟「這週沒東西可講」在信裡看起來一模一樣。
+                # Deliberately loud. Losing this section shouldn't take down the whole
+                # digest, but it also shouldn't vanish silently — "section missing" and
+                # "nothing to report this week" look identical in the email.
                 print(f'WARNING: {warn}')
             digest_content += section
             print('帳號建議已附加' if section else '帳號建議沒有產出內容')
@@ -184,7 +206,7 @@ def main():
 
 
 # ────────────────────────────────────────────────────────────
-# 資料抓取：GCP Release Notes（Atom Feed）
+# Data fetch: GCP Release Notes (Atom Feed)
 # ────────────────────────────────────────────────────────────
 def fetch_gcp_release_notes():
     try:
@@ -192,10 +214,12 @@ def fetch_gcp_release_notes():
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode('utf-8', errors='replace')
 
-        # Atom feed 本身即為 well-formed XML，namespace 已在根節點正確宣告，
-        # 直接用 ElementTree 的 namespace-aware 解析即可，不需要任何 regex 手動剝除
-        # namespace（AWS 版 Blog RSS 曾因手動剝除不完整導致 ElementTree 報
-        # unbound prefix 而被靜默吞掉，這裡從根本避開同類型問題）。
+        # The Atom feed is well-formed XML with the namespace correctly declared on
+        # the root element, so ElementTree's namespace-aware parsing works directly —
+        # no need for regex-based namespace stripping (the AWS version's Blog RSS
+        # once had incomplete manual stripping that made ElementTree throw an
+        # unbound-prefix error and get silently swallowed; this sidesteps that class
+        # of bug entirely).
         ns   = {'atom': 'http://www.w3.org/2005/Atom'}
         root = ET.fromstring(raw)
 
@@ -226,7 +250,7 @@ def fetch_gcp_release_notes():
 
 
 # ────────────────────────────────────────────────────────────
-# 資料抓取：GCP Blog RSS（失敗靜默跳過）
+# Data fetch: GCP Blog RSS (fails silently, skipped)
 # ────────────────────────────────────────────────────────────
 def fetch_gcp_blog_posts():
     try:
@@ -234,7 +258,7 @@ def fetch_gcp_blog_posts():
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode('utf-8', errors='replace')
 
-        root    = ET.fromstring(raw)  # well-formed RSS 2.0，namespace 已正確宣告，不需剝除
+        root    = ET.fromstring(raw)  # well-formed RSS 2.0, namespace correctly declared, no stripping needed
         channel = root.find('channel')
         if channel is None:
             return []
@@ -259,7 +283,7 @@ def fetch_gcp_blog_posts():
 
 
 # ────────────────────────────────────────────────────────────
-# Gemini 呼叫（google-genai SDK，Enterprise/Vertex 模式，IAM 直接認證）
+# Gemini invocation (google-genai SDK, Enterprise/Vertex mode, direct IAM auth)
 # ────────────────────────────────────────────────────────────
 def call_gemini(release_notes, blog_posts):
     builder = _PROMPT_BUILDERS.get(CONFIG['DIGEST_LANGUAGE']) or _PROMPT_BUILDERS['en']
@@ -444,7 +468,7 @@ _PROMPT_BUILDERS = {'zh-TW': _prompt_zh_tw, 'en': _prompt_en}
 
 
 def _invoke_gemini(prompt):
-    """週報本體與帳號建議共用同一條 Gemini 路徑。"""
+    """Shared Gemini call path for both the digest body and the account advice section."""
     client = genai.Client(
         enterprise=True,
         project=CONFIG['GCP_PROJECT_ID'],
@@ -461,7 +485,7 @@ def _invoke_gemini(prompt):
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 A：GCS 存檔
+# Output A: GCS archive
 # ────────────────────────────────────────────────────────────
 def save_to_gcs(content):
     today = _fmt_date(datetime.now(), '%Y-%m-%d')
@@ -476,7 +500,7 @@ def save_to_gcs(content):
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 B：Email（Gmail API 網域範圍委派，V2.1 預設；SendGrid 為 V2.0 舊路徑保留）
+# Output B: Email (Gmail API domain-wide delegation, V2.1 default; SendGrid kept as the V2.0 legacy path)
 # ────────────────────────────────────────────────────────────
 def send_email(digest_content, gcs_url, rn_count, blog_count):
     s        = _strings()
@@ -521,7 +545,7 @@ def _send_error_email(error_msg):
 
 
 def _dispatch_send(subject, html_body, text_fallback):
-    """依 EMAIL_PROVIDER 選路徑，預設 gmail（V2.1），保留 sendgrid（V2.0）供切回/比較。"""
+    """Picks the send path based on EMAIL_PROVIDER; defaults to gmail (V2.1), keeps sendgrid (V2.0) for fallback/comparison."""
     if CONFIG['EMAIL_PROVIDER'] == 'sendgrid':
         _sendgrid_send(subject, html_body, text_fallback)
     else:
@@ -529,25 +553,29 @@ def _dispatch_send(subject, html_body, text_fallback):
 
 
 def _gmail_send(subject, html_body, text_fallback):
-    """Gmail API + Service Account 網域範圍委派（domain-wide delegation），keyless。
+    """Gmail API + Service Account domain-wide delegation, keyless.
 
-    不落地任何 SA JSON 金鑰檔——組織政策 `constraints/iam.disableServiceAccountKeyCreation`
-    直接擋掉這個專案底下建立 SA 金鑰，改走短期 token 換取的方式，暴露面比常駐金鑰檔更小。
+    Never writes an SA JSON key file to disk — the org policy
+    `constraints/iam.disableServiceAccountKeyCreation` blocks creating SA keys in
+    this project outright, so this uses short-lived token exchange instead, which
+    has a smaller exposure surface than a standing key file.
 
-    流程（RFC 7523 JWT-bearer flow）：
-    1. Job 執行身分（`gcp-weekly-digest-sa`，Cloud Run 上用 ADC）呼叫 IAM Credentials
-       API 對 `gcp-weekly-digest-mailer-sa` 做 signJwt——這一步需要 Job SA 對 mailer SA
-       擁有 `roles/iam.serviceAccountTokenCreator`（已授在 SA 資源層級，非專案層級）。
-       簽出的 JWT 帶 `sub=GMAIL_IMPERSONATE_USER`，這個 `sub` 欄位就是網域範圍委派
-       真正生效的地方。
-    2. 拿簽好的 JWT 向 Google OAuth token endpoint 換一個代表該 Workspace 使用者的
-       access token。
-    3. 用這個 token 呼叫 Gmail API `users.messages.send`。
+    Flow (RFC 7523 JWT-bearer flow):
+    1. The job's runtime identity (`gcp-weekly-digest-sa`, using ADC on Cloud Run)
+       calls the IAM Credentials API to signJwt as `gcp-weekly-digest-mailer-sa` —
+       this step requires the job SA to hold `roles/iam.serviceAccountTokenCreator`
+       on the mailer SA (granted at the SA resource level, not project level). The
+       resulting JWT carries `sub=GMAIL_IMPERSONATE_USER`; this `sub` claim is
+       where domain-wide delegation actually takes effect.
+    2. The signed JWT is exchanged with the Google OAuth token endpoint for an
+       access token representing that Workspace user.
+    3. That token is used to call the Gmail API `users.messages.send`.
 
-    若 Workspace Admin Console 尚未把 `GMAIL_MAILER_SA_EMAIL` 的 numeric Client ID
-    加入網域範圍委派白名單（安全性 → API 控制項 → 網域範圍委派，scope 見下方
-    `GMAIL_SCOPE`），第 2 步的 token 交換會回 `unauthorized_client`——不是程式碼問題，
-    是那個手動步驟還沒做，錯誤訊息裡有明確提示。
+    If the Workspace Admin Console hasn't added `GMAIL_MAILER_SA_EMAIL`'s numeric
+    Client ID to the domain-wide delegation allowlist (Security -> API Controls ->
+    Domain-wide Delegation, scope is `GMAIL_SCOPE` below), the step-2 token
+    exchange returns `unauthorized_client` — that's not a code bug, it's just that
+    manual step not done yet; the error message spells this out.
     """
     import base64
     import time
@@ -561,7 +589,7 @@ def _gmail_send(subject, html_body, text_fallback):
     mailer_sa = CONFIG['GMAIL_MAILER_SA_EMAIL']
     impersonate_user = CONFIG['GMAIL_IMPERSONATE_USER']
 
-    # Step 1：Job 自己的執行身分（ADC）取得能呼叫 IAM Credentials API 的 token
+    # Step 1: the job's own runtime identity (ADC) gets a token that can call the IAM Credentials API
     source_creds, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
     source_creds.refresh(ga_requests.Request())
 
@@ -584,7 +612,7 @@ def _gmail_send(subject, html_body, text_fallback):
         raise RuntimeError(f'[Gmail] signJwt 失敗（{sign_resp.status_code}）：{sign_resp.text}')
     signed_jwt = sign_resp.json()['signedJwt']
 
-    # Step 2：拿簽好的 JWT 換代表 impersonate_user 的 access token（網域範圍委派生效點）
+    # Step 2: exchange the signed JWT for an access token representing impersonate_user (where domain-wide delegation kicks in)
     token_resp = requests.post(
         'https://oauth2.googleapis.com/token',
         data={'grant_type': 'urn:ietf:params:oauth:grant-type:jwt-bearer', 'assertion': signed_jwt},
@@ -598,7 +626,7 @@ def _gmail_send(subject, html_body, text_fallback):
         )
     access_token = token_resp.json()['access_token']
 
-    # Step 3：組信、送 Gmail API
+    # Step 3: assemble the message and send via the Gmail API
     message = MIMEMultipart('alternative')
     message['to'] = CONFIG['RECIPIENT_EMAIL']
     message['from'] = CONFIG['SENDER_EMAIL']
@@ -619,7 +647,7 @@ def _gmail_send(subject, html_body, text_fallback):
 
 
 def _sendgrid_send(subject, html_body, text_fallback):
-    """V2.0 舊路徑，保留供切回/對照（EMAIL_PROVIDER=sendgrid）。"""
+    """V2.0 legacy path, kept for fallback/comparison (EMAIL_PROVIDER=sendgrid)."""
     if not CONFIG['SENDGRID_API_KEY']:
         print('[SendGrid] 缺少 SENDGRID_API_KEY，跳過寄信')
         return
@@ -640,12 +668,12 @@ def _sendgrid_send(subject, html_body, text_fallback):
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 C：LinkedIn（預留，FEATURE_POST_TO_LINKEDIN=false）
-# 啟用步驟：
-#   1. 建立 LinkedIn Developer App，取得 OAuth Access Token
-#   2. 存入 Secret Manager：linkedin-access-token / linkedin-person-urn
-#   3. 部署時加 --set-secrets LINKEDIN_ACCESS_TOKEN=linkedin-access-token:latest,...
-#   4. 設定環境變數 FEATURE_POST_TO_LINKEDIN=true
+# Output C: LinkedIn (reserved, FEATURE_POST_TO_LINKEDIN=false)
+# To enable:
+#   1. Create a LinkedIn Developer App and get an OAuth Access Token
+#   2. Store in Secret Manager: linkedin-access-token / linkedin-person-urn
+#   3. Add at deploy time: --set-secrets LINKEDIN_ACCESS_TOKEN=linkedin-access-token:latest,...
+#   4. Set the env var FEATURE_POST_TO_LINKEDIN=true
 # ────────────────────────────────────────────────────────────
 def post_to_linkedin(content):
     token = os.environ.get('LINKEDIN_ACCESS_TOKEN', '')
@@ -684,12 +712,12 @@ def post_to_linkedin(content):
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 D：Webhook（預留，FEATURE_POST_TO_WEBHOOK=false）
-# 啟用步驟：
-#   1. 在 n8n / Make 建立 Webhook，取得 URL
-#   2. 存入 Secret Manager：webhook-url
-#   3. 部署時加 --set-secrets WEBHOOK_URL=webhook-url:latest
-#   4. 設定環境變數 FEATURE_POST_TO_WEBHOOK=true
+# Output D: Webhook (reserved, FEATURE_POST_TO_WEBHOOK=false)
+# To enable:
+#   1. Create a webhook in n8n / Make and get the URL
+#   2. Store in Secret Manager: webhook-url
+#   3. Add at deploy time: --set-secrets WEBHOOK_URL=webhook-url:latest
+#   4. Set the env var FEATURE_POST_TO_WEBHOOK=true
 # Payload: { title, content, linkedInText, gcsUrl, generatedAt }
 # ────────────────────────────────────────────────────────────
 def post_to_webhook(content, gcs_url):
@@ -718,7 +746,7 @@ def post_to_webhook(content, gcs_url):
 
 
 # ────────────────────────────────────────────────────────────
-# Markdown → HTML（Email 用，GCP 藍色主題）
+# Markdown -> HTML (for email, GCP blue theme)
 # ────────────────────────────────────────────────────────────
 def markdown_to_html(markdown):
     def _unescape(s):
@@ -756,7 +784,7 @@ def markdown_to_html(markdown):
 
 
 # ────────────────────────────────────────────────────────────
-# Markdown → LinkedIn 純文字
+# Markdown -> LinkedIn plain text
 # ────────────────────────────────────────────────────────────
 def markdown_to_linkedin(markdown):
     def _unescape(s):
@@ -784,7 +812,7 @@ def markdown_to_linkedin(markdown):
 
 
 # ────────────────────────────────────────────────────────────
-# 工具函式
+# Helper functions
 # ────────────────────────────────────────────────────────────
 def _strip_html(text):
     if not text:
@@ -808,7 +836,7 @@ def _parse_iso_date(date_str):
     if not date_str:
         return None
     try:
-        # Atom 的 updated/published 為 ISO 8601（例：2026-08-26T00:00:00-07:00）
+        # Atom's updated/published fields are ISO 8601 (e.g. 2026-08-26T00:00:00-07:00)
         return datetime.fromisoformat(date_str.strip())
     except ValueError:
         return None

@@ -1,17 +1,21 @@
 """
-帳號建議區段的驗證腳本 —— 部署前跑這支，不要直接推上去。
+Verification script for the account advice section — run this before
+deploying, don't just push straight to prod.
 
-寫這支的原因：`account_context.py` 最初是在**沒有可用憑證**的情況下寫的
-（本機當時 `gcloud` token 過期，而重新登入會切換掉別的專案正在用的 default 帳號，
-所以當下刻意不動認證）。也就是說裡面有幾件事是照官方文件寫的、但沒有實測過。
-這支腳本就是去把那幾件事問清楚。
+Why this script exists: `account_context.py` was originally written
+**without working credentials** (the local `gcloud` token had expired, and
+re-authenticating would have switched the default account used by another
+project, so re-auth was deliberately avoided at the time). That means a few
+things in it were written per the official docs but never actually tested.
+This script goes and settles those open questions.
 
-用法：
+Usage:
 
     gcloud auth application-default login --account=<YOUR_ACCOUNT>
     GCP_PROJECT_ID=<YOUR_PROJECT_ID> python3 verify_advice.py
 
-它只做讀取，不會寄信、不會寫 GCS、不會呼叫 Gemini（除非加 --llm）。
+It only reads — it won't send email, won't write to GCS, and won't call
+Gemini (unless you add --llm).
 """
 
 import os
@@ -26,7 +30,7 @@ def main():
 
     print(f'專案：{PROJECT}\n')
 
-    # ① 套件裝了沒
+    # ① Is the package installed
     try:
         from google.cloud import recommender_v1  # noqa: F401
     except ImportError:
@@ -35,9 +39,11 @@ def main():
 
     import account_context as ac
 
-    # ② location 萬用字元到底能不能用 —— 這是寫的時候最大的未知數。
-    #    官方 API 參考沒有講，所以程式裡是「先試萬用字元、失敗退回逐一列舉」。
-    #    這裡直接把答案問出來，確認之後可以把沒走到的那條路徑刪掉。
+    # ② Whether the location wildcard actually works -- this was the biggest
+    #    unknown when writing this. The official API reference doesn't say, so
+    #    the code tries the wildcard first and falls back to enumerating
+    #    locations on failure. This settles the question directly so the unused
+    #    path can be deleted afterward.
     from google.cloud import recommender_v1
     client = recommender_v1.RecommenderClient()
     probe  = 'google.compute.address.IdleResourceRecommender'
@@ -51,7 +57,7 @@ def main():
         print(f'   → 會走 fallback 逐一列舉：{ac._FALLBACK_LOCATIONS}')
         print('   ⚠️ 確認這份清單涵蓋你實際有資源的 zone/region，否則會漏。')
 
-    # ③ 實際抓一次，看有沒有權限、以及有沒有東西
+    # ③ Do an actual fetch to check permissions and whether there's anything there
     try:
         items = ac.fetch_recommendations(PROJECT)
     except Exception as e:
@@ -68,14 +74,14 @@ def main():
     for label, n in by.items():
         print(f'   - {label}：{n} 筆')
 
-    # ④ render 出來的 prompt 長什麼樣（不呼叫模型）
+    # ④ What the rendered prompt looks like (without calling the model)
     listing, omitted = ac.format_recommendations(items, 'zh-TW')
     print(f'\n④ 清單 render：{len(listing)} 字元，未列出 {omitted} 筆')
     print('─' * 60)
     print(listing[:1500] or '（空的——代表這個專案目前沒有待處理建議，這是好消息）')
     print('─' * 60)
 
-    # ⑤ 要看模型實際會寫什麼，加 --llm
+    # ⑤ To see what the model actually writes, add --llm
     if '--llm' in sys.argv:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import main as digest

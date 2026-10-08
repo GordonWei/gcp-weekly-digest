@@ -1,36 +1,45 @@
 """
-帳號用量建議區段 —— 週報的另一半。
+Account usage advice section — the digest's other half.
 
-週報的前半告訴你 GCP 這週出了什麼；這是後半：你自己的專案裡，有什麼值得處理。
-release notes 回答不了後半，因為它不知道你手上有什麼——這就是這個模組存在的理由，
-它不是「把週報 prompt 寫得更漂亮一點」。
+The first half of the digest tells you what happened in GCP this week; this
+is the second half: what's worth acting on in your own project. Release
+notes can't answer that, because they have no idea what you're actually
+running — that's the whole reason this module exists, not just "making the
+digest prompt a bit fancier."
 
-只有在 FEATURE_ACCOUNT_ADVICE 打開時才會跑，因為它需要 Recommender 的讀取權限。
-那是部署預設值，不是說它比較不重要。
+Only runs when FEATURE_ACCOUNT_ADVICE is on, because it needs Recommender
+read access. That's just the deployment default, not a statement that it
+matters less.
 
 ──────────────────────────────────────────────────────────────
-與 AWS 版（aws-weekly-digest/account_context.py）刻意不同的地方
+Deliberate differences from the AWS version (aws-weekly-digest/account_context.py)
 ──────────────────────────────────────────────────────────────
 
-AWS 那邊我得自己寫 `_FLAGGED_PATTERNS`：從 Cost Explorer 的 usage type 名稱裡用字串
-比對挑出 `PublicIPv4:IdleAddress`、`NatGateway-Hours` 這類「名字本身就是結論」的項目。
-會那樣做是因為 AWS 沒有免費的等價品（Trusted Advisor 的成本檢查要 Business support）。
+On the AWS side I had to write `_FLAGGED_PATTERNS` myself: string-matching
+against Cost Explorer usage type names to pick out items like
+`PublicIPv4:IdleAddress` and `NatGateway-Hours`, where the name itself is
+basically the conclusion. That approach exists because AWS has no free
+equivalent (Trusted Advisor's cost checks require Business support).
 
-GCP 有 Recommender API，**Google 自己就把偵測做好了**，而且比我那五條字串比對完整得多
-（閒置 VM／閒置磁碟／閒置 IP／機型 rightsizing／CUD／閒置專案）。把 AWS 的做法照搬過來，
-等於自己重造一個比 Google 差的版本。
+GCP has the Recommender API — **Google has already done the detection
+work**, and it's far more thorough than my five string patterns (idle VMs,
+idle disks, idle IPs, machine-type rightsizing, CUDs, idle projects).
+Porting the AWS approach over here would just mean reinventing a worse
+version of what Google already built.
 
-所以原則沒變、實作換了：**偵測交給確定性的東西，解釋才交給模型。**
-在 AWS 上「確定性的東西」是我的字串比對；在 GCP 上是 Google 的 API。
-模型在兩邊做的事情完全一樣——排優先順序、講清楚為什麼、以及誠實說出金額很小的時候。
+So the principle stays the same, only the implementation changes:
+**detection is handled by something deterministic; explaining it is left to
+the model.** On AWS, "something deterministic" is my string matching; on GCP
+it's Google's API. What the model does on both sides is identical —
+prioritize, explain clearly, and be honest when the dollar amounts are small.
 """
 
 import os
 
-# ⚠️ 需要新增相依套件 google-cloud-recommender（見 requirements.txt）
+# ⚠️ Requires the extra dependency google-cloud-recommender (see requirements.txt)
 from google.cloud import recommender_v1
 
-# 成本／閒置資源相關的 recommender。ID 取自官方清單：
+# Cost/idle-resource recommenders. IDs taken from the official list:
 # https://docs.cloud.google.com/recommender/docs/recommenders
 _RECOMMENDERS = (
     ('google.compute.address.IdleResourceRecommender',      '閒置的靜態 IP 位址'),
@@ -41,19 +50,28 @@ _RECOMMENDERS = (
     ('google.resourcemanager.projectUtilization.Recommender', '整個專案幾乎沒在用'),
 )
 
-# location 萬用字元 "-"：**實測過了，不能用**（2026-09-01）。
-# API 直接回 `400 InvalidArgument: Invalid location: -`，是明確的拒絕而不是權限問題，
-# 所以原本「先試萬用字元、失敗退回逐一列舉」的雙路徑已經拿掉，只留逐一列舉。
+# Location wildcard "-": **tested, doesn't work** (2026-09-01).
+# The API returns a flat `400 InvalidArgument: Invalid location: -` — a clear
+# rejection, not a permissions issue — so the original "try the wildcard first,
+# fall back to enumerating locations" dual path has been removed; only the
+# enumeration path remains.
 #
-# ⚠️ 第一次驗證時它回的是 403，看起來像「萬用字元不可用」其實是 quota project 沒設 +
-# API 沒啟用。兩種失敗長得很像，如果那時就下結論會得到對的答案配錯的理由。
+# ⚠️ The first verification attempt actually returned 403, which looked like
+# "the wildcard isn't supported" but was really the quota project not being
+# set plus the API not being enabled. The two failure modes look alike; drawing
+# a conclusion at that point would have gotten the right answer for the wrong
+# reason.
 
-# 要查的 location。多數 recommender 的 location 是 zone 或 region，把 100 多個 zone
-# 全掃一遍會讓呼叫次數爆炸，所以這裡只列這個專案實際有資源的，並開環境變數可調。
+# Locations to query. Most recommenders scope to a zone or region, and sweeping
+# all 100+ zones would blow up the call count, so this only lists locations
+# where this project actually has resources, and is adjustable via an env var.
 #
-# ⚠️ **這份清單漏一個 location，就等於安靜地漏掉那裡的所有建議。** 2026-09-01 實測時
-# 原本的預設值就漏了 `us-east1-c`——而那是這個專案唯一一台 VM 跟唯一一顆
-# 磁碟所在的地方，等於當時整份清單掃不到任何 compute 資源。加資源到新區域時要回來補這裡。
+# ⚠️ **Missing a single location here means silently missing every
+# recommendation for it.** During 2026-09-01 testing, the original default was
+# missing `us-east1-c` — which happened to be where this project's only VM and
+# only disk live, so at the time the whole list scanned zero compute
+# resources. Remember to come back and add locations here when adding
+# resources to a new region.
 _FALLBACK_LOCATIONS = [
     s.strip() for s in os.environ.get(
         'ADVICE_LOCATIONS',
@@ -62,16 +80,17 @@ _FALLBACK_LOCATIONS = [
     ).split(',') if s.strip()
 ]
 
-# 一個 recommender 最多取幾筆，避免單一類別灌爆 prompt。
+# Max items to take per recommender, so a single category doesn't flood the prompt.
 MAX_PER_RECOMMENDER = int(os.environ.get('ADVICE_MAX_PER_RECOMMENDER', '10'))
 
-# 整份清單的字元上限。超過就截斷，並且**在 prompt 裡明講截了幾筆**——
-# 安靜截短的清單讀起來跟完整的一模一樣，這是 AWS 版學到的教訓。
+# Character cap for the whole listing. Truncate past this, and **explicitly say
+# in the prompt how many items were cut** — a silently truncated list reads
+# identically to a complete one, which is a lesson learned from the AWS version.
 MAX_LISTING_CHARS = int(os.environ.get('ADVICE_MAX_LISTING_CHARS', '12000'))
 
 
 def _money_to_float(money):
-    """google.type.Money → float。省錢在 API 裡是負數，這裡保持原樣不取絕對值。"""
+    """google.type.Money -> float. Savings are negative in the API; kept as-is here, not made absolute."""
     if not money:
         return 0.0
     return float(getattr(money, 'units', 0) or 0) + float(getattr(money, 'nanos', 0) or 0) / 1e9
@@ -84,25 +103,31 @@ def _fetch_one(client, project_id, recommender_id, location):
 
 
 def fetch_recommendations(project_id):
-    """回傳 [(recommender 中文說明, recommendation)]，只取還沒被處理掉的。
+    """Returns [(recommender label, recommendation)], only the ones not yet resolved.
 
-    會拋例外；由 build_advice_section 決定怎麼處理。
+    Raises on failure; it's up to build_advice_section to decide how to handle it.
 
-    🔴 這裡的 except 分兩類，不可以再合併回一個 bare except（2026-09-01 修）：
+    🔴 The except clauses here are deliberately split into two categories and must
+    not be merged back into one bare except (fixed 2026-09-01):
 
-    「某個 recommender 在某個 location 不存在」是正常的（zone 級的 recommender 拿 region
-    去問就會這樣），跳過即可。但「沒權限」「API 沒啟用」不是正常的——那種錯誤如果也一起
-    跳過，整批會回傳空 list，而上層看到空 list 會印出「目前沒有任何待處理建議」。
-    **權限不足和真的沒建議，輸出會長得一模一樣。**
+    "This recommender doesn't exist at this location" is expected (happens when a
+    zone-scoped recommender is queried at a region), so it's fine to skip. But
+    "no permission" or "API not enabled" is not expected — if those get skipped
+    too, the whole batch silently returns an empty list, and the caller then
+    prints "no open recommendations right now." **Insufficient permissions and
+    genuinely having no recommendations look exactly the same in the output.**
 
-    這不是假設性的擔憂：2026-09-01 第一次實測時就是這樣，quota project 沒設 + API 沒啟用
-    讓 42 個 (recommender × location) 組合全部 403，腳本卻報告「抓取成功 ✅ 共 0 筆」。
+    This isn't a hypothetical concern: on the first real test on 2026-09-01, the
+    quota project wasn't set and the API wasn't enabled, causing all 42
+    (recommender x location) combinations to 403 — yet the script reported
+    "fetch succeeded, 0 items."
     """
     from google.api_core import exceptions as gexc
 
-    # 這幾類代表「這個組合問不到東西」，屬預期內，跳過。
+    # These mean "this combination just has nothing to query" — expected, skip.
     _SKIPPABLE = (gexc.InvalidArgument, gexc.NotFound)
-    # 這幾類代表「環境沒設好」，必須讓它炸出來、不能靜靜當成沒建議。
+    # These mean "the environment isn't set up right" — must be allowed to blow up,
+    # never silently treated as "no recommendations."
     _FATAL = (gexc.PermissionDenied, gexc.Unauthenticated, gexc.ResourceExhausted)
 
     client = recommender_v1.RecommenderClient()
@@ -119,13 +144,15 @@ def fetch_recommendations(project_id):
             except _SKIPPABLE:
                 skipped += 1
             except Exception as e:                              # noqa: BLE001
-                # 沒歸類到的錯誤：不吞掉，也不中斷整批，但要在 log 裡看得見。
+                # Uncategorized error: don't swallow it, don't abort the whole batch,
+                # but make sure it's visible in the logs.
                 print(f'[advice] ⚠️ {recommender_id} @ {location}: '
                       f'{type(e).__name__}: {e}')
 
         for r in recs:
             state = getattr(getattr(r, 'state_info', None), 'state', None)
-            # 只要還沒被接受／關閉的建議；已處理過的沒必要每週再唸一次。
+            # Only recommendations that haven't been accepted/dismissed yet; no need
+            # to nag about ones already handled every single week.
             if state is not None and state != recommender_v1.RecommendationStateInfo.State.ACTIVE:
                 continue
             found.append((label, r))
@@ -135,9 +162,11 @@ def fetch_recommendations(project_id):
           f'{len(_FALLBACK_LOCATIONS)} 個 location，'
           f'{skipped} 個組合不適用，取得 {len(found)} 筆建議')
 
-    # 最後一道守衛：如果**每一個**組合都被跳過，那不是「沒有建議」，是「一次都沒真的查到」
-    # ——多半代表 _FALLBACK_LOCATIONS 整份寫錯了。這種情況下回傳空 list 會讓上層印出
-    # 「目前沒有任何待處理建議」，跟前面那個 bare except 的老問題是同一個形狀。
+    # Last-resort guard: if **every single** combination was skipped, that's not
+    # "no recommendations," it's "never actually queried anything successfully" —
+    # most likely _FALLBACK_LOCATIONS is entirely wrong. In that case, returning
+    # an empty list would make the caller print "no open recommendations right
+    # now," which is the same shape of bug as the old bare-except problem above.
     if total and skipped == total:
         raise RuntimeError(
             f'{total} 個 (recommender × location) 組合全部不適用，'
@@ -147,7 +176,7 @@ def fetch_recommendations(project_id):
 
 
 def format_recommendations(items, lang):
-    """把建議render成 prompt 用的清單，回傳 (text, omitted_count)。"""
+    """Renders the recommendations into a listing for the prompt, returns (text, omitted_count)."""
     zh = lang != 'en'
     by_label = {}
     for label, r in items:
@@ -162,7 +191,7 @@ def format_recommendations(items, lang):
         for r in recs[:MAX_PER_RECOMMENDER]:
             cost = _money_to_float(
                 getattr(getattr(getattr(r, 'primary_impact', None), 'cost_projection', None), 'cost', None))
-            # 負數代表省錢；轉成正的「每月可省」比較好讀。
+            # Negative means savings; flip to a positive "estimated monthly savings" for readability.
             saving = f'{-cost:.2f}' if cost < 0 else f'{cost:.2f}'
             money  = (f'（每月約 {saving} {getattr(getattr(getattr(r, "primary_impact", None), "cost_projection", None), "cost", None).currency_code if cost else ""}）'
                       if cost else '')
@@ -272,11 +301,14 @@ _PROMPTS = {'zh-TW': _prompt_zh_tw, 'en': _prompt_en}
 
 
 def build_advice_section(lang, project_id, invoke_llm):
-    """回傳 (markdown 區段, warning)。不會拋例外。
+    """Returns (markdown section, warning). Never raises.
 
-    Recommender 掛掉不該害你收不到週報——週報是產品，這一段是加值。但這個 repo 的姊妹
-    專案已經吃過一次虧（except 是為了擋錯而寫，結果吞掉 parser error，連續幾週寄出一個
-    永遠空白的區段），所以失敗會以 warning 回傳給呼叫端印出來，不在這裡安靜吸收掉。
+    A Recommender failure shouldn't cost you the whole digest — the digest is the
+    product, this section is a bonus. But this repo's sister project already got
+    burned once by this (an except meant to guard against errors ended up
+    swallowing a parser error, silently mailing out a permanently blank section
+    for weeks), so failures here are returned as a warning for the caller to
+    print, rather than being silently absorbed in this function.
     """
     builder = _PROMPTS.get(lang) or _PROMPTS['zh-TW']
 
@@ -289,8 +321,8 @@ def build_advice_section(lang, project_id, invoke_llm):
         return '', f'account advice skipped: {type(e).__name__}: {e}'
 
     if not items:
-        # 這是好消息，不是失敗；但還是要說出來，否則「沒有區段」跟「這週沒東西」
-        # 在信裡看起來一模一樣。
+        # This is good news, not a failure; but it still needs to be said, otherwise
+        # "no section" and "nothing this week" look identical in the email.
         heading = '## 你的專案：優化與改善建議' if lang != 'en' else '## Your project: what to improve'
         body    = ('Google Cloud Recommender 目前對這個專案沒有任何待處理建議。'
                    if lang != 'en' else
